@@ -461,49 +461,67 @@ def process_links():
     def generate():
         import queue as _queue
         import threading as _threading
+        import random as _random
 
         total = len(links)
         results_ordered = [None] * total
         progress_q = _queue.Queue()
+        sem = _threading.Semaphore(2)
 
-        def worker(i, link):
+        WORKER_TIMEOUT = 60  # секунд на одно фото
+        MAX_RETRIES = 2
+
+        def process_one(i, link, attempt=1):
             slug = link.rstrip("/").split("/")[-1]
             name = slug + ".jpg"
             entry = {"name": name, "link": link, "idx": i+1, "ok": False, "raw": "", "coords": None}
-            progress_q.put({"type": "status", "step": "download", "i": i+1, "total": total, "name": name})
+            progress_q.put({"type": "status", "step": "download", "i": i+1, "total": total,
+                            "name": name, "attempt": attempt})
             try:
                 direct = resolve_direct_url(link)
                 m = re.search(r"\.(jpg|jpeg|png|webp)", direct, re.I)
                 ext = ("." + m.group(1).lower()) if m else ".jpg"
                 dest = os.path.join(session_dir, name + ext)
                 download_image(direct, dest)
-                progress_q.put({"type": "status", "step": "ocr", "i": i+1, "total": total, "name": name})
+                progress_q.put({"type": "status", "step": "ocr", "i": i+1, "total": total,
+                                "name": name, "attempt": attempt})
                 result = ocr_image(dest, name)
                 entry.update(result)
-                # Удаляем файл сразу после обработки — освобождаем место
                 try:
                     os.remove(dest)
                 except Exception:
                     pass
             except Exception as e:
                 entry["raw"] = str(e)
-            results_ordered[i] = entry
-            progress_q.put({"type": "result", "entry": entry})
+            return entry
 
-        # Запускаем до 5 потоков параллельно в случайном порядке
-        import random as _random
+        def worker_with_timeout(i, link, attempt=1):
+            result_box = [None]
+            def _run():
+                result_box[0] = process_one(i, link, attempt)
+            t = _threading.Thread(target=_run, daemon=True)
+            t.start()
+            t.join(timeout=WORKER_TIMEOUT)
+            if t.is_alive():
+                slug = link.rstrip("/").split("/")[-1]
+                name = slug + ".jpg"
+                return {"name": name, "link": link, "idx": i+1, "ok": False,
+                        "raw": "timeout", "coords": None}
+            return result_box[0]
+
+        # ── Основной проход ──────────────────────────────────────────
         indexed_links = list(enumerate(links))
         _random.shuffle(indexed_links)
 
-        threads = []
-        sem = _threading.Semaphore(2)
-
-        def run_worker(i, link):
+        def run_worker(i, link, attempt=1):
             with sem:
-                worker(i, link)
+                entry = worker_with_timeout(i, link, attempt)
+                results_ordered[i] = entry
+                progress_q.put({"type": "result", "entry": entry})
 
+        threads = []
         for i, link in indexed_links:
-            t = _threading.Thread(target=run_worker, args=(i, link), daemon=True)
+            t = _threading.Thread(target=run_worker, args=(i, link, 1), daemon=True)
             threads.append(t)
             t.start()
 
@@ -514,10 +532,30 @@ def process_links():
             if msg["type"] == "result":
                 done_count += 1
 
-        for t in threads:
-            t.join(timeout=0)
+        # ── Retry для failed/timeout ─────────────────────────────────
+        for attempt in range(2, MAX_RETRIES + 2):
+            retry_list = [(i, links[i]) for i in range(total)
+                          if results_ordered[i] and not results_ordered[i].get("ok")]
+            if not retry_list:
+                break
+
+            yield f"data: {json.dumps({'type': 'retry_start', 'attempt': attempt, 'count': len(retry_list)})}\n\n"
+
+            retry_threads = []
+            for i, link in retry_list:
+                t = _threading.Thread(target=run_worker, args=(i, link, attempt), daemon=True)
+                retry_threads.append(t)
+                t.start()
+
+            for _ in range(len(retry_list)):
+                msg = progress_q.get()
+                yield f"data: {json.dumps(msg)}\n\n"
 
         results = [r for r in results_ordered if r is not None]
+        # Помечаем окончательно failed
+        for r in results:
+            if not r.get("ok") and not r.get("raw"):
+                r["raw"] = "failed"
         shutil.rmtree(session_dir, ignore_errors=True)
         yield f"data: {json.dumps({'type':'done','results':results,'session_id':session_id})}\n\n"
 
