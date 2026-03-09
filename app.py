@@ -42,8 +42,10 @@ def crop_top_left(img: Image.Image) -> Image.Image:
 def image_to_base64(img: Image.Image) -> str:
     import io
     buf = io.BytesIO()
-    img.save(buf, format='JPEG', quality=90)
-    return base64.b64encode(buf.getvalue()).decode()
+    img.save(buf, format='JPEG', quality=70)  # 70 достаточно для OCR
+    data = base64.b64encode(buf.getvalue()).decode()
+    buf.close()
+    return data
 
 
 # ─────────────────────────────────────────────
@@ -147,36 +149,37 @@ def ocr_universal(img: Image.Image) -> tuple:
 
 def ocr_image(path: str, name: str) -> dict:
     """Автодетекция формата: один вызов Claude на полное фото."""
-    img = Image.open(path)
-    w, h = img.size
-
-    # Отправляем полное фото — Claude сам найдёт координаты
-    # Ограничиваем размер до 1600px по длинной стороне
-    max_side = 1600
-    if max(w, h) > max_side:
-        scale = max_side / max(w, h)
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-
     try:
-        img_orig = Image.open(path)
-        w, h = img_orig.size
+        with Image.open(path) as img_orig:
+            img_orig.load()
+            w, h = img_orig.size
 
-        # Шаг 1: Левая полоса — кроп w//5 чтобы захватить все строки, ROTATE_90
-        strip = img_orig.crop((0, 0, w // 5, h)).transpose(Image.ROTATE_90)
-        strip = strip.resize((strip.width * 4, strip.height * 4), Image.LANCZOS)
-        coords = ocr_with_claude(strip)
-        if coords:
-            return {'name': name, 'raw': 'Claude Vision API (left)', 'coords': list(coords), 'ok': True}
+            # Шаг 1: Левая полоса — кроп w//5, ROTATE_90, upscale x2 (не x4!)
+            strip = img_orig.crop((0, 0, w // 5, h)).transpose(Image.ROTATE_90)
+            strip = strip.resize((strip.width * 2, strip.height * 2), Image.LANCZOS)
+            coords = ocr_with_claude(strip)
+            del strip
+            if coords:
+                return {'name': name, 'raw': 'Claude Vision API (left)', 'coords': list(coords), 'ok': True}
 
-        # Шаг 2: Нижняя строка (°C °E формат)
-        bottom = img_orig.crop((0, int(h * 0.87), w, h))
-        bottom = bottom.resize((bottom.width * 3, bottom.height * 3), Image.LANCZOS)
-        coords = ocr_bottom_text(bottom)
-        if coords:
-            return {'name': name, 'raw': 'Claude Vision API (bottom)', 'coords': list(coords), 'ok': True}
+            # Шаг 2: Нижняя строка (°C °E формат)
+            bottom = img_orig.crop((0, int(h * 0.87), w, h))
+            bottom = bottom.resize((bottom.width * 2, bottom.height * 2), Image.LANCZOS)
+            coords = ocr_bottom_text(bottom)
+            del bottom
+            if coords:
+                return {'name': name, 'raw': 'Claude Vision API (bottom)', 'coords': list(coords), 'ok': True}
 
-        # Шаг 3: Полное фото — универсальный fallback
-        coords = ocr_universal(img)
+            # Шаг 3: Полное фото — ресайз до 1200px по длинной стороне
+            max_side = 1200
+            if max(w, h) > max_side:
+                scale = max_side / max(w, h)
+                img_small = img_orig.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            else:
+                img_small = img_orig.copy()
+
+        coords = ocr_universal(img_small)
+        del img_small
         if coords:
             return {'name': name, 'raw': 'Claude Vision API (full)', 'coords': list(coords), 'ok': True}
 
@@ -477,6 +480,11 @@ def process_links():
                 progress_q.put({"type": "status", "step": "ocr", "i": i+1, "total": total, "name": name})
                 result = ocr_image(dest, name)
                 entry.update(result)
+                # Удаляем файл сразу после обработки — освобождаем место
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
             except Exception as e:
                 entry["raw"] = str(e)
             results_ordered[i] = entry
@@ -488,7 +496,7 @@ def process_links():
         _random.shuffle(indexed_links)
 
         threads = []
-        sem = _threading.Semaphore(5)
+        sem = _threading.Semaphore(2)
 
         def run_worker(i, link):
             with sem:
