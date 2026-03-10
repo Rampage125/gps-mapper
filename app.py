@@ -88,7 +88,7 @@ def _call_claude(img: Image.Image, prompt: str) -> str:
             data = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8', errors='ignore')
-        raise RuntimeError(f"API {e.code}: {body[:300]}")
+        raise RuntimeError(f"API {e.code}: {body}")
     if 'error' in data:
         raise RuntimeError(f"API error: {data['error']}")
     return data['content'][0]['text'].strip()
