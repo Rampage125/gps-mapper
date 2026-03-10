@@ -471,76 +471,86 @@ def process_links():
         WORKER_TIMEOUT = 30  # секунд на одно фото
         MAX_RETRIES = 2
 
-        def process_one(i, link, attempt=1):
-            slug = link.rstrip("/").split("/")[-1]
-            name = slug + ".jpg"
-            entry = {"name": name, "link": link, "idx": i+1, "ok": False, "raw": "", "coords": None}
-            progress_q.put({"type": "status", "step": "download", "i": i+1, "total": total,
-                            "name": name, "attempt": attempt})
-            try:
-                direct = resolve_direct_url(link)
-                m = re.search(r"\.(jpg|jpeg|png|webp)", direct, re.I)
-                ext = ("." + m.group(1).lower()) if m else ".jpg"
-                dest = os.path.join(session_dir, name + ext)
-                download_image(direct, dest)
-                progress_q.put({"type": "status", "step": "ocr", "i": i+1, "total": total,
-                                "name": name, "attempt": attempt})
-                result = ocr_image(dest, name)
-                entry.update(result)
-                try:
-                    os.remove(dest)
-                except Exception:
-                    pass
-            except Exception as e:
-                entry["raw"] = str(e)
-            return entry
-
-        MAX_CONCURRENT = 2
         PER_LINK_TIMEOUT = 20
+        MAX_CONCURRENT = 2
+        MAX_RETRIES = 2
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-        import time as _time
-
-        def process_link_safe(i, link, attempt):
-            import socket as _socket
-            _socket.setdefaulttimeout(15)
+        def worker(i, link, attempt):
+            """Воркер: скачивает + OCR одну ссылку с таймаутом через Event."""
+            import socket as _s
+            _s.setdefaulttimeout(15)
             slug = link.rstrip("/").split("/")[-1]
             name = slug + ".jpg"
             done_evt = _threading.Event()
             result_box = [None]
 
             def _run():
-                import socket as _s
-                _s.setdefaulttimeout(15)
+                import socket as _s2
+                _s2.setdefaulttimeout(15)
+                slug2 = link.rstrip("/").split("/")[-1]
+                name2 = slug2 + ".jpg"
+                entry = {"name": name2, "link": link, "idx": i+1, "ok": False, "raw": "", "coords": None}
+                # Статус: download
+                progress_q.put({"type": "status", "step": "download", "i": i+1,
+                                 "total": total, "name": name2, "attempt": attempt})
                 try:
-                    result_box[0] = process_one(i, link, attempt)
+                    direct = resolve_direct_url(link)
+                    m = re.search(r"\.(jpg|jpeg|png|webp)", direct, re.I)
+                    ext = ("." + m.group(1).lower()) if m else ".jpg"
+                    dest = os.path.join(session_dir, name2 + ext)
+                    download_image(direct, dest)
+                    # Статус: ocr
+                    progress_q.put({"type": "status", "step": "ocr", "i": i+1,
+                                     "total": total, "name": name2, "attempt": attempt})
+                    result = ocr_image(dest, name2)
+                    entry.update(result)
+                    try:
+                        os.remove(dest)
+                    except Exception:
+                        pass
                 except Exception as e:
-                    result_box[0] = {"name": name, "link": link, "idx": i+1,
-                                     "ok": False, "raw": str(e), "coords": None}
+                    entry["raw"] = str(e)
+                result_box[0] = entry
                 done_evt.set()
 
             t = _threading.Thread(target=_run, daemon=True)
             t.start()
             if done_evt.wait(timeout=PER_LINK_TIMEOUT):
-                return result_box[0] or {"name": name, "link": link, "idx": i+1,
-                                         "ok": False, "raw": "no result", "coords": None}
-            return {"name": name, "link": link, "idx": i+1, "ok": False,
-                    "raw": "timeout", "coords": None}
+                return result_box[0]
+            return {"name": name, "link": link, "idx": i+1, "ok": False, "raw": "timeout", "coords": None}
 
         def run_batch(items):
-            with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as ex:
-                futures = {ex.submit(process_link_safe, i, link, attempt): (i, link)
-                           for i, link, attempt in items}
-                for f in _as_completed(futures):
-                    i, link = futures[f]
+            """Запускает items через очередь с MAX_CONCURRENT воркерами.
+            Статусы и результаты читаются из общей progress_q."""
+            task_q = _queue.Queue()
+            for item in items:
+                task_q.put(item)
+
+            def pool_worker():
+                while True:
                     try:
-                        entry = f.result()
-                    except Exception as e:
-                        slug = link.rstrip("/").split("/")[-1]
-                        entry = {"name": slug+".jpg", "link": link, "idx": i+1,
-                                 "ok": False, "raw": str(e), "coords": None}
+                        item = task_q.get_nowait()
+                    except _queue.Empty:
+                        break
+                    i, link, attempt = item
+                    entry = worker(i, link, attempt)
                     results_ordered[i] = entry
-                    yield f"data: {json.dumps({'type': 'result', 'entry': entry})}\n\n"
+                    progress_q.put({"type": "result", "entry": entry})
+                    task_q.task_done()
+
+            threads = []
+            for _ in range(MAX_CONCURRENT):
+                t = _threading.Thread(target=pool_worker, daemon=True)
+                t.start()
+                threads.append(t)
+
+            done = 0
+            total_batch = len(items)
+            while done < total_batch:
+                msg = progress_q.get()
+                yield f"data: {json.dumps(msg)}\n\n"
+                if msg["type"] == "result":
+                    done += 1
 
         # ── Основной проход ──────────────────────────────────────────
         indexed_links = list(enumerate(links))
