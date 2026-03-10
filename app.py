@@ -42,8 +42,10 @@ def crop_top_left(img: Image.Image) -> Image.Image:
 def image_to_base64(img: Image.Image) -> str:
     import io
     buf = io.BytesIO()
-    img.save(buf, format='JPEG', quality=90)
-    return base64.b64encode(buf.getvalue()).decode()
+    img.save(buf, format='JPEG', quality=70)  # 70 достаточно для OCR
+    data = base64.b64encode(buf.getvalue()).decode()
+    buf.close()
+    return data
 
 
 # ─────────────────────────────────────────────
@@ -147,36 +149,37 @@ def ocr_universal(img: Image.Image) -> tuple:
 
 def ocr_image(path: str, name: str) -> dict:
     """Автодетекция формата: один вызов Claude на полное фото."""
-    img = Image.open(path)
-    w, h = img.size
-
-    # Отправляем полное фото — Claude сам найдёт координаты
-    # Ограничиваем размер до 1600px по длинной стороне
-    max_side = 1600
-    if max(w, h) > max_side:
-        scale = max_side / max(w, h)
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-
     try:
-        img_orig = Image.open(path)
-        w, h = img_orig.size
+        with Image.open(path) as img_orig:
+            img_orig.load()
+            w, h = img_orig.size
 
-        # Шаг 1: Левая полоса — кроп w//5 чтобы захватить все строки, ROTATE_90
-        strip = img_orig.crop((0, 0, w // 5, h)).transpose(Image.ROTATE_90)
-        strip = strip.resize((strip.width * 4, strip.height * 4), Image.LANCZOS)
-        coords = ocr_with_claude(strip)
-        if coords:
-            return {'name': name, 'raw': 'Claude Vision API (left)', 'coords': list(coords), 'ok': True}
+            # Шаг 1: Левая полоса — кроп w//5, ROTATE_90, upscale x2 (не x4!)
+            strip = img_orig.crop((0, 0, w // 5, h)).transpose(Image.ROTATE_90)
+            strip = strip.resize((strip.width * 2, strip.height * 2), Image.LANCZOS)
+            coords = ocr_with_claude(strip)
+            del strip
+            if coords:
+                return {'name': name, 'raw': 'Claude Vision API (left)', 'coords': list(coords), 'ok': True}
 
-        # Шаг 2: Нижняя строка (°C °E формат)
-        bottom = img_orig.crop((0, int(h * 0.87), w, h))
-        bottom = bottom.resize((bottom.width * 3, bottom.height * 3), Image.LANCZOS)
-        coords = ocr_bottom_text(bottom)
-        if coords:
-            return {'name': name, 'raw': 'Claude Vision API (bottom)', 'coords': list(coords), 'ok': True}
+            # Шаг 2: Нижняя строка (°C °E формат)
+            bottom = img_orig.crop((0, int(h * 0.87), w, h))
+            bottom = bottom.resize((bottom.width * 2, bottom.height * 2), Image.LANCZOS)
+            coords = ocr_bottom_text(bottom)
+            del bottom
+            if coords:
+                return {'name': name, 'raw': 'Claude Vision API (bottom)', 'coords': list(coords), 'ok': True}
 
-        # Шаг 3: Полное фото — универсальный fallback
-        coords = ocr_universal(img)
+            # Шаг 3: Полное фото — ресайз до 1200px по длинной стороне
+            max_side = 1200
+            if max(w, h) > max_side:
+                scale = max_side / max(w, h)
+                img_small = img_orig.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            else:
+                img_small = img_orig.copy()
+
+        coords = ocr_universal(img_small)
+        del img_small
         if coords:
             return {'name': name, 'raw': 'Claude Vision API (full)', 'coords': list(coords), 'ok': True}
 
@@ -458,58 +461,128 @@ def process_links():
     def generate():
         import queue as _queue
         import threading as _threading
+        import random as _random
 
         total = len(links)
         results_ordered = [None] * total
         progress_q = _queue.Queue()
 
-        def worker(i, link):
+        PER_LINK_TIMEOUT = 20
+        MAX_CONCURRENT = 5
+        MAX_RETRIES = 2
+
+        def worker(i, link, attempt):
+            """Воркер: скачивает + OCR одну ссылку с таймаутом через Event."""
             slug = link.rstrip("/").split("/")[-1]
             name = slug + ".jpg"
-            entry = {"name": name, "link": link, "idx": i+1, "ok": False, "raw": "", "coords": None}
-            progress_q.put({"type": "status", "step": "download", "i": i+1, "total": total, "name": name})
-            try:
-                direct = resolve_direct_url(link)
-                m = re.search(r"\.(jpg|jpeg|png|webp)", direct, re.I)
-                ext = ("." + m.group(1).lower()) if m else ".jpg"
-                dest = os.path.join(session_dir, name + ext)
-                download_image(direct, dest)
-                progress_q.put({"type": "status", "step": "ocr", "i": i+1, "total": total, "name": name})
-                result = ocr_image(dest, name)
-                entry.update(result)
-            except Exception as e:
-                entry["raw"] = str(e)
-            results_ordered[i] = entry
-            progress_q.put({"type": "result", "entry": entry})
+            done_evt = _threading.Event()
+            result_box = [None]
 
-        # Запускаем до 5 потоков параллельно в случайном порядке
-        import random as _random
+            def _run():
+                import socket as _s2
+                _s2.setdefaulttimeout(15)
+                slug2 = link.rstrip("/").split("/")[-1]
+                name2 = slug2 + ".jpg"
+                entry = {"name": name2, "link": link, "idx": i+1, "ok": False, "raw": "", "coords": None}
+                # Статус: download
+                progress_q.put({"type": "status", "step": "download", "i": i+1,
+                                 "total": total, "name": name2, "attempt": attempt})
+                try:
+                    direct = resolve_direct_url(link)
+                    m = re.search(r"\.(jpg|jpeg|png|webp)", direct, re.I)
+                    ext = ("." + m.group(1).lower()) if m else ".jpg"
+                    dest = os.path.join(session_dir, name2 + ext)
+                    download_image(direct, dest)
+                    # Статус: ocr
+                    progress_q.put({"type": "status", "step": "ocr", "i": i+1,
+                                     "total": total, "name": name2, "attempt": attempt})
+                    result = ocr_image(dest, name2)
+                    entry.update(result)
+                    try:
+                        os.remove(dest)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    entry["raw"] = str(e)
+                result_box[0] = entry
+                done_evt.set()
+
+            t = _threading.Thread(target=_run, daemon=True)
+            t.start()
+            if done_evt.wait(timeout=PER_LINK_TIMEOUT):
+                return result_box[0]
+            return {"name": name, "link": link, "idx": i+1, "ok": False, "raw": "timeout", "coords": None}
+
+        def run_batch(items):
+            """Запускает items через очередь с MAX_CONCURRENT воркерами.
+            Статусы и результаты читаются из общей progress_q.
+            Keepalive-комментарии шлются каждые 3 сек чтобы прокси не резал соединение."""
+            task_q = _queue.Queue()
+            for item in items:
+                task_q.put(item)
+
+            def pool_worker():
+                while True:
+                    try:
+                        item = task_q.get_nowait()
+                    except _queue.Empty:
+                        break
+                    i, link, attempt = item
+                    entry = worker(i, link, attempt)
+                    results_ordered[i] = entry
+                    progress_q.put({"type": "result", "entry": entry})
+                    task_q.task_done()
+
+            threads = []
+            for _ in range(MAX_CONCURRENT):
+                t = _threading.Thread(target=pool_worker, daemon=True)
+                t.start()
+                threads.append(t)
+
+            # Watchdog: сигнализирует когда все pool-воркеры завершились
+            all_done_evt = _threading.Event()
+            def _watchdog():
+                for t in threads:
+                    t.join()
+                all_done_evt.set()
+            _threading.Thread(target=_watchdog, daemon=True).start()
+
+            done = 0
+            total_batch = len(items)
+            while done < total_batch:
+                try:
+                    msg = progress_q.get(timeout=3)  # не блокируем вечно
+                    yield f"data: {json.dumps(msg)}\n\n"
+                    if msg["type"] == "result":
+                        done += 1
+                except _queue.Empty:
+                    if all_done_evt.is_set():
+                        # Все воркеры закончили, но результатов меньше ожидаемого
+                        # Предотвращаем вечное зависание
+                        break
+                    # Keepalive: SSE-комментарий чтобы прокси не закрыл соединение
+                    yield ": keepalive\n\n"
+
+        # ── Основной проход ──────────────────────────────────────────
         indexed_links = list(enumerate(links))
         _random.shuffle(indexed_links)
+        batch = [(i, link, 1) for i, link in indexed_links]
+        yield from run_batch(batch)
 
-        threads = []
-        sem = _threading.Semaphore(5)
-
-        def run_worker(i, link):
-            with sem:
-                worker(i, link)
-
-        for i, link in indexed_links:
-            t = _threading.Thread(target=run_worker, args=(i, link), daemon=True)
-            threads.append(t)
-            t.start()
-
-        done_count = 0
-        while done_count < total:
-            msg = progress_q.get()
-            yield f"data: {json.dumps(msg)}\n\n"
-            if msg["type"] == "result":
-                done_count += 1
-
-        for t in threads:
-            t.join(timeout=0)
+        # ── Retry для failed/timeout ─────────────────────────────────
+        for attempt in range(2, MAX_RETRIES + 2):
+            retry_list = [(i, links[i]) for i in range(total)
+                          if results_ordered[i] and not results_ordered[i].get("ok")]
+            if not retry_list:
+                break
+            yield f"data: {json.dumps({'type': 'retry_start', 'attempt': attempt, 'count': len(retry_list)})}\n\n"
+            retry_batch = [(i, link, attempt) for i, link in retry_list]
+            yield from run_batch(retry_batch)
 
         results = [r for r in results_ordered if r is not None]
+        for r in results:
+            if not r.get("ok") and not r.get("raw"):
+                r["raw"] = "failed"
         shutil.rmtree(session_dir, ignore_errors=True)
         yield f"data: {json.dumps({'type':'done','results':results,'session_id':session_id})}\n\n"
 
@@ -545,7 +618,6 @@ def build_map_route():
 
 @app.route('/map/<map_id>')
 def view_map(map_id):
-    # Безопасность: только hex символы
     if not re.fullmatch(r'[0-9a-f]{32}', map_id):
         return 'Not found', 404
     path = os.path.join(app.config['OUTPUT_FOLDER'], f'map_{map_id}.html')
@@ -556,7 +628,6 @@ def view_map(map_id):
 
 @app.route('/api/share', methods=['POST'])
 def share_map():
-    """Заливает HTML карты на pagedrop.io и возвращает публичный URL."""
     data = request.get_json()
     map_id = data.get('map_id', '')
     if not re.fullmatch(r'[0-9a-f]{32}', map_id):
@@ -576,7 +647,6 @@ def share_map():
         'visibility': 'private'
     }).encode('utf-8')
 
-    # ВАЖНО: только Content-Type, никаких browser-заголовков (Origin, Sec-Fetch-*, etc.)
     req = urllib.request.Request(
         'https://pagedrop.io/api/upload',
         data=payload,
