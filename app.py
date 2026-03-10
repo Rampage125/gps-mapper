@@ -534,10 +534,14 @@ def process_links():
                 t = _threading.Thread(target=pool_worker, args=(task_q,), daemon=True)
                 t.start()
                 pool.append(t)
-            # Ждём результаты
-            for _ in range(len(items)):
+            # Ждём результаты — считаем только "result", статусы пропускаем
+            done = 0
+            total_batch = len(items)
+            while done < total_batch:
                 msg = progress_q.get()
                 yield f"data: {json.dumps(msg)}\n\n"
+                if msg["type"] == "result":
+                    done += 1
             # Останавливаем воркеры
             for _ in range(WORKERS):
                 task_q.put(None)
