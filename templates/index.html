@@ -1261,6 +1261,7 @@
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      const partialResults = new Array(rawLinks.length);  // накапливаем на случай обрыва
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1280,7 +1281,11 @@
               const idx = msg.entry.idx || null;
               if (idx !== null) {
                 updateTracker(idx, msg.entry.ok ? 'done-ok' : 'done-fail', msg.entry.coords);
+                // Накапливаем результаты на клиенте на случай обрыва стрима
+                partialResults[idx - 1] = msg.entry;
               }
+            } else if (msg.type === 'retry_start') {
+              console.log(`[processLinks] retry attempt ${msg.attempt}, links: ${msg.count}`);
             } else if (msg.type === 'done') {
               ocrResults = msg.results;
               hideProgress();
@@ -1290,10 +1295,29 @@
           } catch(e) {}
         }
       }
+      // Стрим закрылся — если done не пришёл, показываем частичные результаты
+      const collected = partialResults.filter(Boolean);
+      if (ocrResults.length === 0 && collected.length > 0) {
+        ocrResults = collected;
+        hideProgress();
+        renderResults(ocrResults);
+        setStep(3);
+        showToast(`Соединение прервано. Показано ${collected.length} результатов.`);
+      }
     } catch (e) {
       console.error('[processLinks error]', e);
-      showToast('Ошибка: ' + e.message);
-      setStep(1);
+      // Показываем частичные результаты если есть
+      const collected = partialResults.filter(Boolean);
+      if (collected.length > 0) {
+        ocrResults = collected;
+        hideProgress();
+        renderResults(ocrResults);
+        setStep(3);
+        showToast(`Ошибка: ${e.message}. Показано ${collected.length} результатов.`);
+      } else {
+        showToast('Ошибка: ' + e.message);
+        setStep(1);
+      }
     } finally {
       linksProcessing = false;
     }
