@@ -66,7 +66,7 @@ def _call_claude(img: Image.Image, prompt: str) -> str:
 
     b64 = image_to_base64(img)
     payload = json.dumps({
-        "model": "claude-sonnet-4-6",
+        "model": "claude-3-5-sonnet-20241022",
         "max_tokens": 256,
         "messages": [{
             "role": "user",
