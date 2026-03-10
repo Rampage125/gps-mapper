@@ -495,67 +495,52 @@ def process_links():
                 entry["raw"] = str(e)
             return entry
 
-        WORKERS = 2  # максимум одновременных обработок
+        MAX_CONCURRENT = 2
+        PER_LINK_TIMEOUT = 20
 
-        done_counter = [0]
-        done_lock = _threading.Lock()
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+        import time as _time
 
-        def pool_worker(task_q):
+        def process_link_safe(i, link, attempt):
             import socket as _socket
-            _socket.setdefaulttimeout(20)
-            while True:
-                item = task_q.get()
-                if item is None:
-                    task_q.task_done()
-                    break
-                i, link, attempt = item
+            _socket.setdefaulttimeout(15)
+            slug = link.rstrip("/").split("/")[-1]
+            name = slug + ".jpg"
+            done_evt = _threading.Event()
+            result_box = [None]
+
+            def _run():
+                import socket as _s
+                _s.setdefaulttimeout(15)
                 try:
-                    entry = process_one(i, link, attempt)
+                    result_box[0] = process_one(i, link, attempt)
                 except Exception as e:
-                    slug = link.rstrip("/").split("/")[-1]
-                    entry = {"name": slug+".jpg", "link": link, "idx": i+1,
-                             "ok": False, "raw": str(e), "coords": None}
-                results_ordered[i] = entry
-                progress_q.put({"type": "result", "entry": entry})
-                task_q.task_done()
+                    result_box[0] = {"name": name, "link": link, "idx": i+1,
+                                     "ok": False, "raw": str(e), "coords": None}
+                done_evt.set()
+
+            t = _threading.Thread(target=_run, daemon=True)
+            t.start()
+            if done_evt.wait(timeout=PER_LINK_TIMEOUT):
+                return result_box[0] or {"name": name, "link": link, "idx": i+1,
+                                         "ok": False, "raw": "no result", "coords": None}
+            return {"name": name, "link": link, "idx": i+1, "ok": False,
+                    "raw": "timeout", "coords": None}
 
         def run_batch(items):
-            task_q = _queue.Queue()
-            for item in items:
-                task_q.put(item)
-            pool = []
-            for _ in range(WORKERS):
-                t = _threading.Thread(target=pool_worker, args=(task_q,), daemon=True)
-                t.start()
-                pool.append(t)
-            # Ждём все результаты с таймаутом на случай зависания воркера
-            done = 0
-            total_batch = len(items)
-            deadline = WORKER_TIMEOUT * total_batch + 30  # максимум ждём
-            import time as _time
-            start = _time.time()
-            while done < total_batch:
-                elapsed = _time.time() - start
-                remaining = max(1, deadline - elapsed)
-                try:
-                    msg = progress_q.get(timeout=remaining)
-                    yield f"data: {json.dumps(msg)}\n\n"
-                    if msg["type"] == "result":
-                        done += 1
-                except _queue.Empty:
-                    # Принудительно завершаем оставшиеся как timeout
-                    for idx in range(len(results_ordered)):
-                        if results_ordered[idx] is None:
-                            link = links[idx]
-                            slug = link.rstrip("/").split("/")[-1]
-                            entry = {"name": slug+".jpg", "link": link, "idx": idx+1,
-                                     "ok": False, "raw": "timeout", "coords": None}
-                            results_ordered[idx] = entry
-                            yield f"data: {json.dumps({'type': 'result', 'entry': entry})}\n\n"
-                            done += 1
-                    break
-            for _ in range(WORKERS):
-                task_q.put(None)
+            with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as ex:
+                futures = {ex.submit(process_link_safe, i, link, attempt): (i, link)
+                           for i, link, attempt in items}
+                for f in _as_completed(futures):
+                    i, link = futures[f]
+                    try:
+                        entry = f.result()
+                    except Exception as e:
+                        slug = link.rstrip("/").split("/")[-1]
+                        entry = {"name": slug+".jpg", "link": link, "idx": i+1,
+                                 "ok": False, "raw": str(e), "coords": None}
+                    results_ordered[i] = entry
+                    yield f"data: {json.dumps({'type': 'result', 'entry': entry})}\n\n"
 
         # ── Основной проход ──────────────────────────────────────────
         indexed_links = list(enumerate(links))
