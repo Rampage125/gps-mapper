@@ -57,6 +57,13 @@ def _call_claude(img: Image.Image, prompt: str) -> str:
     if not ANTHROPIC_API_KEY:
         raise RuntimeError('ANTHROPIC_API_KEY не задан')
 
+    # Anthropic API limit: 8000px max side, ~5MB. Cap at 1500px to be safe.
+    MAX_DIM = 1500
+    w, h = img.size
+    if max(w, h) > MAX_DIM:
+        scale = MAX_DIM / max(w, h)
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
     b64 = image_to_base64(img)
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
@@ -76,8 +83,12 @@ def _call_claude(img: Image.Image, prompt: str) -> str:
         headers={'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01'},
         method='POST'
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8', errors='ignore')
+        raise RuntimeError(f"API {e.code}: {body[:300]}")
     if 'error' in data:
         raise RuntimeError(f"API error: {data['error']}")
     return data['content'][0]['text'].strip()
@@ -517,7 +528,7 @@ def process_links():
         results_ordered = [None] * total
         progress_q = _queue.Queue()
 
-        PER_LINK_TIMEOUT = 20
+        PER_LINK_TIMEOUT = 120
         MAX_CONCURRENT = 5
         MAX_RETRIES = 2
 
@@ -538,14 +549,17 @@ def process_links():
                 progress_q.put({"type": "status", "step": "download", "i": i+1,
                                  "total": total, "name": name2, "attempt": attempt})
                 try:
+                    entry["_step"] = "resolve"
                     direct = resolve_direct_url(link)
                     m = re.search(r"\.(jpg|jpeg|png|webp)", direct, re.I)
                     ext = ("." + m.group(1).lower()) if m else ".jpg"
                     dest = os.path.join(session_dir, name2 + ext)
+                    entry["_step"] = "download"
                     download_image(direct, dest)
                     # Статус: ocr
                     progress_q.put({"type": "status", "step": "ocr", "i": i+1,
                                      "total": total, "name": name2, "attempt": attempt})
+                    entry["_step"] = "ocr"
                     result = ocr_image(dest, name2)
                     entry.update(result)
                     try:
@@ -553,7 +567,14 @@ def process_links():
                     except Exception:
                         pass
                 except Exception as e:
-                    entry["raw"] = str(e)
+                    if hasattr(e, 'read'):
+                        try:
+                            body = e.read().decode('utf-8', errors='ignore')
+                            entry["raw"] = f"HTTP {e.code} ({entry.get('_step','?')}): {body[:250]}"
+                        except Exception:
+                            entry["raw"] = str(e)
+                    else:
+                        entry["raw"] = str(e)
                 result_box[0] = entry
                 done_evt.set()
 
