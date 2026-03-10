@@ -76,7 +76,7 @@ def _call_claude(img: Image.Image, prompt: str) -> str:
         headers={'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01'},
         method='POST'
     )
-    with urllib.request.urlopen(req, timeout=25) as resp:
+    with urllib.request.urlopen(req, timeout=60) as resp:
         data = json.loads(resp.read())
     if 'error' in data:
         raise RuntimeError(f"API error: {data['error']}")
@@ -399,7 +399,7 @@ IBB_RE = re.compile(r"https?://i\.ibb\.co/[^\s\"']+", re.I)
 
 def resolve_direct_url(share_url: str) -> str:
     req = urllib.request.Request(share_url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=15) as r:
+    with urllib.request.urlopen(req, timeout=40) as r:
         html = r.read().decode("utf-8", errors="ignore")
     m = OG_RE.search(html)
     if m:
@@ -414,7 +414,7 @@ def resolve_direct_url(share_url: str) -> str:
 
 def download_image(url: str, dest_path: str):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=20) as r:
+    with urllib.request.urlopen(req, timeout=60) as r:
         with open(dest_path, "wb") as f:
             while True:
                 chunk = r.read(1024 * 1024)
@@ -468,12 +468,10 @@ def process_links():
         progress_q = _queue.Queue()
         sem = _threading.Semaphore(2)
 
-        WORKER_TIMEOUT = 45  # секунд на одно фото (download+ocr)
+        WORKER_TIMEOUT = 30  # секунд на одно фото
         MAX_RETRIES = 2
 
         def process_one(i, link, attempt=1):
-            import socket as _socket
-            _socket.setdefaulttimeout(20)  # глобальный таймаут на сокет
             slug = link.rstrip("/").split("/")[-1]
             name = slug + ".jpg"
             entry = {"name": name, "link": link, "idx": i+1, "ok": False, "raw": "", "coords": None}
@@ -497,32 +495,26 @@ def process_links():
                 entry["raw"] = str(e)
             return entry
 
-        WORKERS = 2  # максимум одновременных загрузок+OCR
+        WORKERS = 2  # максимум одновременных обработок
 
-        def process_with_timeout(i, link, attempt=1):
-            result_box = [None]
-            def _run():
-                result_box[0] = process_one(i, link, attempt)
-            t = _threading.Thread(target=_run, daemon=True)
-            t.start()
-            t.join(timeout=WORKER_TIMEOUT)
-            if t.is_alive():
-                slug = link.rstrip("/").split("/")[-1]
-                name = slug + ".jpg"
-                return {"name": name, "link": link, "idx": i+1, "ok": False,
-                        "raw": "timeout", "coords": None}
-            return result_box[0] or {"name": link.rstrip("/").split("/")[-1]+".jpg",
-                                      "link": link, "idx": i+1, "ok": False,
-                                      "raw": "no result", "coords": None}
+        done_counter = [0]
+        done_lock = _threading.Lock()
 
         def pool_worker(task_q):
+            import socket as _socket
+            _socket.setdefaulttimeout(20)
             while True:
                 item = task_q.get()
                 if item is None:
                     task_q.task_done()
                     break
                 i, link, attempt = item
-                entry = process_with_timeout(i, link, attempt)
+                try:
+                    entry = process_one(i, link, attempt)
+                except Exception as e:
+                    slug = link.rstrip("/").split("/")[-1]
+                    entry = {"name": slug+".jpg", "link": link, "idx": i+1,
+                             "ok": False, "raw": str(e), "coords": None}
                 results_ordered[i] = entry
                 progress_q.put({"type": "result", "entry": entry})
                 task_q.task_done()
@@ -536,18 +528,34 @@ def process_links():
                 t = _threading.Thread(target=pool_worker, args=(task_q,), daemon=True)
                 t.start()
                 pool.append(t)
-            # Ждём результаты — считаем только "result", статусы пропускаем
+            # Ждём все результаты с таймаутом на случай зависания воркера
             done = 0
             total_batch = len(items)
+            deadline = WORKER_TIMEOUT * total_batch + 30  # максимум ждём
+            import time as _time
+            start = _time.time()
             while done < total_batch:
-                msg = progress_q.get()
-                yield f"data: {json.dumps(msg)}\n\n"
-                if msg["type"] == "result":
-                    done += 1
-            # Останавливаем воркеры
+                elapsed = _time.time() - start
+                remaining = max(1, deadline - elapsed)
+                try:
+                    msg = progress_q.get(timeout=remaining)
+                    yield f"data: {json.dumps(msg)}\n\n"
+                    if msg["type"] == "result":
+                        done += 1
+                except _queue.Empty:
+                    # Принудительно завершаем оставшиеся как timeout
+                    for idx in range(len(results_ordered)):
+                        if results_ordered[idx] is None:
+                            link = links[idx]
+                            slug = link.rstrip("/").split("/")[-1]
+                            entry = {"name": slug+".jpg", "link": link, "idx": idx+1,
+                                     "ok": False, "raw": "timeout", "coords": None}
+                            results_ordered[idx] = entry
+                            yield f"data: {json.dumps({'type': 'result', 'entry': entry})}\n\n"
+                            done += 1
+                    break
             for _ in range(WORKERS):
                 task_q.put(None)
-            task_q.join()
 
         # ── Основной проход ──────────────────────────────────────────
         indexed_links = list(enumerate(links))
