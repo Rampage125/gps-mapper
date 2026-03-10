@@ -76,7 +76,7 @@ def _call_claude(img: Image.Image, prompt: str) -> str:
         headers={'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01'},
         method='POST'
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=25) as resp:
         data = json.loads(resp.read())
     if 'error' in data:
         raise RuntimeError(f"API error: {data['error']}")
@@ -399,7 +399,7 @@ IBB_RE = re.compile(r"https?://i\.ibb\.co/[^\s\"']+", re.I)
 
 def resolve_direct_url(share_url: str) -> str:
     req = urllib.request.Request(share_url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=40) as r:
+    with urllib.request.urlopen(req, timeout=15) as r:
         html = r.read().decode("utf-8", errors="ignore")
     m = OG_RE.search(html)
     if m:
@@ -414,7 +414,7 @@ def resolve_direct_url(share_url: str) -> str:
 
 def download_image(url: str, dest_path: str):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=20) as r:
         with open(dest_path, "wb") as f:
             while True:
                 chunk = r.read(1024 * 1024)
@@ -468,10 +468,12 @@ def process_links():
         progress_q = _queue.Queue()
         sem = _threading.Semaphore(2)
 
-        WORKER_TIMEOUT = 30  # секунд на одно фото
+        WORKER_TIMEOUT = 45  # секунд на одно фото (download+ocr)
         MAX_RETRIES = 2
 
         def process_one(i, link, attempt=1):
+            import socket as _socket
+            _socket.setdefaulttimeout(20)  # глобальный таймаут на сокет
             slug = link.rstrip("/").split("/")[-1]
             name = slug + ".jpg"
             entry = {"name": name, "link": link, "idx": i+1, "ok": False, "raw": "", "coords": None}
