@@ -517,7 +517,7 @@ def process_links():
         results_ordered = [None] * total
         progress_q = _queue.Queue()
 
-        PER_LINK_TIMEOUT = 20
+        PER_LINK_TIMEOUT = 120
         MAX_CONCURRENT = 5
         MAX_RETRIES = 2
 
