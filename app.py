@@ -468,7 +468,7 @@ def process_links():
         progress_q = _queue.Queue()
         sem = _threading.Semaphore(2)
 
-        WORKER_TIMEOUT = 60  # секунд на одно фото
+        WORKER_TIMEOUT = 30  # секунд на одно фото
         MAX_RETRIES = 2
 
         def process_one(i, link, attempt=1):
@@ -495,29 +495,33 @@ def process_links():
                 entry["raw"] = str(e)
             return entry
 
-        def worker_with_timeout(i, link, attempt=1):
-            result_box = [None]
-            def _run():
-                result_box[0] = process_one(i, link, attempt)
-            t = _threading.Thread(target=_run, daemon=True)
-            t.start()
-            t.join(timeout=WORKER_TIMEOUT)
-            if t.is_alive():
+        def run_worker(i, link, attempt=1):
+            # Семафор берём только на время активной работы, не на таймаут
+            with sem:
+                # Запускаем реальную работу в отдельном потоке с таймаутом
+                result_box = [None]
+                def _run():
+                    result_box[0] = process_one(i, link, attempt)
+                inner = _threading.Thread(target=_run, daemon=True)
+                inner.start()
+                inner.join(timeout=WORKER_TIMEOUT)
+
+            # Семафор уже отпущен — теперь ждём результат
+            if inner.is_alive():
                 slug = link.rstrip("/").split("/")[-1]
                 name = slug + ".jpg"
-                return {"name": name, "link": link, "idx": i+1, "ok": False,
-                        "raw": "timeout", "coords": None}
-            return result_box[0]
+                entry = {"name": name, "link": link, "idx": i+1, "ok": False,
+                         "raw": "timeout", "coords": None}
+            else:
+                entry = result_box[0] or {"name": link.rstrip("/").split("/")[-1]+".jpg",
+                                           "link": link, "idx": i+1, "ok": False,
+                                           "raw": "no result", "coords": None}
+            results_ordered[i] = entry
+            progress_q.put({"type": "result", "entry": entry})
 
         # ── Основной проход ──────────────────────────────────────────
         indexed_links = list(enumerate(links))
         _random.shuffle(indexed_links)
-
-        def run_worker(i, link, attempt=1):
-            with sem:
-                entry = worker_with_timeout(i, link, attempt)
-                results_ordered[i] = entry
-                progress_q.put({"type": "result", "entry": entry})
 
         threads = []
         for i, link in indexed_links:
@@ -535,115 +539,4 @@ def process_links():
         # ── Retry для failed/timeout ─────────────────────────────────
         for attempt in range(2, MAX_RETRIES + 2):
             retry_list = [(i, links[i]) for i in range(total)
-                          if results_ordered[i] and not results_ordered[i].get("ok")]
-            if not retry_list:
-                break
-
-            yield f"data: {json.dumps({'type': 'retry_start', 'attempt': attempt, 'count': len(retry_list)})}\n\n"
-
-            retry_threads = []
-            for i, link in retry_list:
-                t = _threading.Thread(target=run_worker, args=(i, link, attempt), daemon=True)
-                retry_threads.append(t)
-                t.start()
-
-            for _ in range(len(retry_list)):
-                msg = progress_q.get()
-                yield f"data: {json.dumps(msg)}\n\n"
-
-        results = [r for r in results_ordered if r is not None]
-        # Помечаем окончательно failed
-        for r in results:
-            if not r.get("ok") and not r.get("raw"):
-                r["raw"] = "failed"
-        shutil.rmtree(session_dir, ignore_errors=True)
-        yield f"data: {json.dumps({'type':'done','results':results,'session_id':session_id})}\n\n"
-
-    return Response(stream_with_context(generate()),
-                    mimetype='text/event-stream',
-                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
-
-
-@app.route('/api/build_map', methods=['POST'])
-def build_map_route():
-    data = request.get_json()
-    points_raw = data.get('points', [])
-
-    if not points_raw:
-        return jsonify({'error': 'No points provided'}), 400
-
-    points = []
-    for p in points_raw:
-        try:
-            points.append((float(p['lat']), float(p['lon']), str(p['name'])))
-        except Exception:
-            continue
-
-    if not points:
-        return jsonify({'error': 'Invalid points format'}), 400
-
-    map_id = uuid.uuid4().hex
-    out_path = os.path.join(app.config['OUTPUT_FOLDER'], f'map_{map_id}.html')
-    build_map(points, out_path)
-
-    return jsonify({'map_id': map_id})
-
-
-@app.route('/map/<map_id>')
-def view_map(map_id):
-    # Безопасность: только hex символы
-    if not re.fullmatch(r'[0-9a-f]{32}', map_id):
-        return 'Not found', 404
-    path = os.path.join(app.config['OUTPUT_FOLDER'], f'map_{map_id}.html')
-    if not os.path.exists(path):
-        return 'Map not found', 404
-    return send_file(path)
-
-
-@app.route('/api/share', methods=['POST'])
-def share_map():
-    """Заливает HTML карты на pagedrop.io и возвращает публичный URL."""
-    data = request.get_json()
-    map_id = data.get('map_id', '')
-    if not re.fullmatch(r'[0-9a-f]{32}', map_id):
-        return jsonify({'error': 'Invalid map_id'}), 400
-
-    path = os.path.join(app.config['OUTPUT_FOLDER'], f'map_{map_id}.html')
-    if not os.path.exists(path):
-        return jsonify({'error': 'Map not found'}), 404
-
-    with open(path, 'r', encoding='utf-8') as f:
-        html_content = f.read()
-
-    payload = json.dumps({
-        'html': html_content,
-        'ttl': '3d',
-        'fileName': f'gps_map_{map_id[:8]}.html',
-        'visibility': 'private'
-    }).encode('utf-8')
-
-    # ВАЖНО: только Content-Type, никаких browser-заголовков (Origin, Sec-Fetch-*, etc.)
-    req = urllib.request.Request(
-        'https://pagedrop.io/api/upload',
-        data=payload,
-        headers={'Content-Type': 'application/json'},
-        method='POST'
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode('utf-8'))
-
-        if not result.get('success'):
-            code = result.get('code', '')
-            err  = result.get('error', str(result))
-            return jsonify({'error': f'{code}: {err}'}), 502
-
-        url = result['data']['url']
-        return jsonify({'url': url, 'service': 'pagedrop.io'})
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 502
-
-
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+                          if results_order
