@@ -549,14 +549,17 @@ def process_links():
                 progress_q.put({"type": "status", "step": "download", "i": i+1,
                                  "total": total, "name": name2, "attempt": attempt})
                 try:
+                    entry["_step"] = "resolve"
                     direct = resolve_direct_url(link)
                     m = re.search(r"\.(jpg|jpeg|png|webp)", direct, re.I)
                     ext = ("." + m.group(1).lower()) if m else ".jpg"
                     dest = os.path.join(session_dir, name2 + ext)
+                    entry["_step"] = "download"
                     download_image(direct, dest)
                     # Статус: ocr
                     progress_q.put({"type": "status", "step": "ocr", "i": i+1,
                                      "total": total, "name": name2, "attempt": attempt})
+                    entry["_step"] = "ocr"
                     result = ocr_image(dest, name2)
                     entry.update(result)
                     try:
@@ -564,7 +567,14 @@ def process_links():
                     except Exception:
                         pass
                 except Exception as e:
-                    entry["raw"] = str(e)
+                    if hasattr(e, 'read'):
+                        try:
+                            body = e.read().decode('utf-8', errors='ignore')
+                            entry["raw"] = f"HTTP {e.code} ({entry.get('_step','?')}): {body[:250]}"
+                        except Exception:
+                            entry["raw"] = str(e)
+                    else:
+                        entry["raw"] = str(e)
                 result_box[0] = entry
                 done_evt.set()
 
