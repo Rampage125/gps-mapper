@@ -466,19 +466,13 @@ def process_links():
         total = len(links)
         results_ordered = [None] * total
         progress_q = _queue.Queue()
-        sem = _threading.Semaphore(2)
-
-        WORKER_TIMEOUT = 30  # секунд на одно фото
-        MAX_RETRIES = 2
 
         PER_LINK_TIMEOUT = 20
-        MAX_CONCURRENT = 2
+        MAX_CONCURRENT = 5
         MAX_RETRIES = 2
 
         def worker(i, link, attempt):
             """Воркер: скачивает + OCR одну ссылку с таймаутом через Event."""
-            import socket as _s
-            _s.setdefaulttimeout(15)
             slug = link.rstrip("/").split("/")[-1]
             name = slug + ".jpg"
             done_evt = _threading.Event()
@@ -521,7 +515,8 @@ def process_links():
 
         def run_batch(items):
             """Запускает items через очередь с MAX_CONCURRENT воркерами.
-            Статусы и результаты читаются из общей progress_q."""
+            Статусы и результаты читаются из общей progress_q.
+            Keepalive-комментарии шлются каждые 3 сек чтобы прокси не резал соединение."""
             task_q = _queue.Queue()
             for item in items:
                 task_q.put(item)
@@ -544,13 +539,29 @@ def process_links():
                 t.start()
                 threads.append(t)
 
+            # Watchdog: сигнализирует когда все pool-воркеры завершились
+            all_done_evt = _threading.Event()
+            def _watchdog():
+                for t in threads:
+                    t.join()
+                all_done_evt.set()
+            _threading.Thread(target=_watchdog, daemon=True).start()
+
             done = 0
             total_batch = len(items)
             while done < total_batch:
-                msg = progress_q.get()
-                yield f"data: {json.dumps(msg)}\n\n"
-                if msg["type"] == "result":
-                    done += 1
+                try:
+                    msg = progress_q.get(timeout=3)  # не блокируем вечно
+                    yield f"data: {json.dumps(msg)}\n\n"
+                    if msg["type"] == "result":
+                        done += 1
+                except _queue.Empty:
+                    if all_done_evt.is_set():
+                        # Все воркеры закончили, но результатов меньше ожидаемого
+                        # Предотвращаем вечное зависание
+                        break
+                    # Keepalive: SSE-комментарий чтобы прокси не закрыл соединение
+                    yield ": keepalive\n\n"
 
         # ── Основной проход ──────────────────────────────────────────
         indexed_links = list(enumerate(links))
