@@ -496,17 +496,19 @@ def process_links():
             return entry
 
         def run_worker(i, link, attempt=1):
-            # Семафор берём только на время активной работы, не на таймаут
-            with sem:
-                # Запускаем реальную работу в отдельном потоке с таймаутом
-                result_box = [None]
-                def _run():
-                    result_box[0] = process_one(i, link, attempt)
-                inner = _threading.Thread(target=_run, daemon=True)
-                inner.start()
-                inner.join(timeout=WORKER_TIMEOUT)
+            result_box = [None]
+            def _run():
+                result_box[0] = process_one(i, link, attempt)
 
-            # Семафор уже отпущен — теперь ждём результат
+            # Берём семафор, запускаем поток, сразу отпускаем семафор
+            sem.acquire()
+            inner = _threading.Thread(target=_run, daemon=True)
+            inner.start()
+            sem.release()  # Отпускаем ДО join — другие потоки не ждут
+
+            # Ждём результат уже без семафора
+            inner.join(timeout=WORKER_TIMEOUT)
+
             if inner.is_alive():
                 slug = link.rstrip("/").split("/")[-1]
                 name = slug + ".jpg"
