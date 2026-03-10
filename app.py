@@ -539,4 +539,4 @@ def process_links():
         # ── Retry для failed/timeout ─────────────────────────────────
         for attempt in range(2, MAX_RETRIES + 2):
             retry_list = [(i, links[i]) for i in range(total)
-                          if results_order
+                          if results_ordered[i] and not results_ordered[i].get("ok")]
