@@ -734,7 +734,7 @@
   <!-- Links input only -->
   <textarea class="links-textarea" id="links-input"
     placeholder="Вставьте ссылки — по одной на строку или с нумерацией:&#10;1. https://ibb.co/abc123&#10;2. https://ibb.co/xyz456&#10;https://ibb.co/..."></textarea>
-  <button class="btn btn-primary" id="links-btn" onclick="processLinks()" ontouchend="setTimeout(()=>this.blur(),1200)" style="margin-top:12px">
+  <button class="btn btn-primary" id="links-btn" onclick="processLinks()" ontouchend="setTimeout(()=>this.blur(),1500)" style="margin-top:12px">
     Scan Coordinates
   </button>
   <div class="link-tracker" id="link-tracker" style="display:none"></div>
@@ -1244,6 +1244,7 @@
     if (!rawLinks.length) { showToast('Ссылки не найдены'); return; }
 
     linksProcessing = true;
+    setTimeout(() => document.getElementById('links-btn').blur(), 1500);
     document.getElementById('results-panel').classList.remove('visible');
     document.getElementById('map-section').classList.remove('visible');
     initTracker(rawLinks);

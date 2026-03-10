@@ -200,6 +200,7 @@ ROUTE_JS = Template("""
   var selected = [];
   var activeLine = null;
   var activePopup = null;
+  var proximityThreshold = 15;
 
   function fmtMeters(m) {
     if (m >= 1000) return (m/1000).toFixed(3) + " km";
@@ -222,9 +223,40 @@ ROUTE_JS = Template("""
     return "Point";
   }
 
+  function applyProximityColors(threshold) {
+    proximityThreshold = threshold;
+    var markers = [];
+    map.eachLayer(function(layer) {
+      if (layer instanceof L.Marker) markers.push(layer);
+    });
+    markers.forEach(function(m) {
+      var ll = m.getLatLng();
+      var tooClose = markers.some(function(other) {
+        return other !== m && ll.distanceTo(other.getLatLng()) < threshold;
+      });
+      m.__proxColor = tooClose ? '#ff3b30' : '#4286f4';
+      var el = m.getElement();
+      if (el) {
+        var dot = el.querySelector('.gps-dot');
+        if (dot) dot.style.background = m.__proxColor;
+      }
+    });
+  }
+
   function reset() {
     selected.forEach(function(s) {
-      if (s.marker && s.marker.__origIcon) s.marker.setIcon(s.marker.__origIcon);
+      if (s.marker && s.marker.__origIcon) {
+        s.marker.setIcon(s.marker.__origIcon);
+        (function(marker) {
+          setTimeout(function() {
+            var el = marker.getElement();
+            if (el) {
+              var dot = el.querySelector('.gps-dot');
+              if (dot) dot.style.background = marker.__proxColor || '#4286f4';
+            }
+          }, 0);
+        })(s.marker);
+      }
     });
     selected = [];
     if (activeLine) { map.removeLayer(activeLine); activeLine = null; }
@@ -257,6 +289,32 @@ ROUTE_JS = Template("""
       .setLatLng(shifted).setContent(body).openOn(map);
   }
 
+  // Min distance control (top-left)
+  var ProximityControl = L.Control.extend({
+    options: { position: 'topleft' },
+    onAdd: function() {
+      var div = L.DomUtil.create('div', 'leaflet-bar');
+      div.style.cssText = 'background:rgba(255,255,255,.92);padding:6px 10px;border-radius:10px;border:1px solid #999;font-size:12px;user-select:none';
+      div.innerHTML = "<b>Min distance</b><br>"
+        + "<span style='opacity:.7'>closer = </span><span style='color:#ff3b30;font-weight:bold'>&#9632;</span> red<br>"
+        + "<input type='number' id='prox-input' value='15' min='1' max='9999' "
+        + "style='width:52px;font-size:12px;border:1px solid #ccc;border-radius:4px;"
+        + "padding:2px 4px;text-align:right;margin-top:4px'> m";
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.disableScrollPropagation(div);
+      setTimeout(function() {
+        var inp = div.querySelector('#prox-input');
+        if (inp) L.DomEvent.on(inp, 'input change', function() {
+          var val = parseFloat(this.value);
+          if (!isNaN(val) && val > 0) applyProximityColors(val);
+        });
+      }, 0);
+      return div;
+    }
+  });
+  map.addControl(new ProximityControl());
+
+  // Route distance control (top-right)
   var ResetControl = L.Control.extend({
     options: { position: 'topright' },
     onAdd: function() {
@@ -285,6 +343,7 @@ ROUTE_JS = Template("""
         });
       }
     });
+    applyProximityColors(proximityThreshold);
   }
 
   attachToMarkers();
@@ -301,28 +360,17 @@ def build_map(points: list, out_path: str):
 
     m = folium.Map(location=(avg_lat, avg_lon), zoom_start=17, control_scale=True)
 
-    from math import radians, sin, cos, sqrt, atan2
-
-    def haversine(lat1, lon1, lat2, lon2):
-        R = 6371000  # metres
-        φ1, φ2 = radians(lat1), radians(lat2)
-        dφ = radians(lat2 - lat1)
-        dλ = radians(lon2 - lon1)
-        a = sin(dφ/2)**2 + cos(φ1)*cos(φ2)*sin(dλ/2)**2
-        return R * 2 * atan2(sqrt(a), sqrt(1 - a))
-
-    for i, (lat, lon, name) in enumerate(points):
-        # Check if any other point is within 15m
-        too_close = any(
-            haversine(lat, lon, lat2, lon2) < 15
-            for j, (lat2, lon2, _) in enumerate(points) if j != i
-        )
-        marker_color = 'red' if too_close else 'blue'
+    for lat, lon, name in points:
         folium.Marker(
             (lat, lon),
             tooltip=name,
             popup=f"{name}<br>{lat}, {lon}",
-            icon=folium.Icon(color=marker_color, icon='circle', prefix='fa'),
+            icon=folium.DivIcon(
+                html="<div class='gps-dot' style='width:14px;height:14px;border-radius:50%;"
+                     "background:#4286f4;border:2px solid white;box-shadow:0 0 4px rgba(0,0,0,.4)'></div>",
+                icon_size=(14, 14),
+                icon_anchor=(7, 7),
+            ),
         ).add_to(m)
 
     m.fit_bounds([(p[0], p[1]) for p in points])
