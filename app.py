@@ -495,48 +495,59 @@ def process_links():
                 entry["raw"] = str(e)
             return entry
 
-        def run_worker(i, link, attempt=1):
+        WORKERS = 2  # максимум одновременных загрузок+OCR
+
+        def process_with_timeout(i, link, attempt=1):
             result_box = [None]
             def _run():
                 result_box[0] = process_one(i, link, attempt)
-
-            # Берём семафор, запускаем поток, сразу отпускаем семафор
-            sem.acquire()
-            inner = _threading.Thread(target=_run, daemon=True)
-            inner.start()
-            sem.release()  # Отпускаем ДО join — другие потоки не ждут
-
-            # Ждём результат уже без семафора
-            inner.join(timeout=WORKER_TIMEOUT)
-
-            if inner.is_alive():
+            t = _threading.Thread(target=_run, daemon=True)
+            t.start()
+            t.join(timeout=WORKER_TIMEOUT)
+            if t.is_alive():
                 slug = link.rstrip("/").split("/")[-1]
                 name = slug + ".jpg"
-                entry = {"name": name, "link": link, "idx": i+1, "ok": False,
-                         "raw": "timeout", "coords": None}
-            else:
-                entry = result_box[0] or {"name": link.rstrip("/").split("/")[-1]+".jpg",
-                                           "link": link, "idx": i+1, "ok": False,
-                                           "raw": "no result", "coords": None}
-            results_ordered[i] = entry
-            progress_q.put({"type": "result", "entry": entry})
+                return {"name": name, "link": link, "idx": i+1, "ok": False,
+                        "raw": "timeout", "coords": None}
+            return result_box[0] or {"name": link.rstrip("/").split("/")[-1]+".jpg",
+                                      "link": link, "idx": i+1, "ok": False,
+                                      "raw": "no result", "coords": None}
+
+        def pool_worker(task_q):
+            while True:
+                item = task_q.get()
+                if item is None:
+                    task_q.task_done()
+                    break
+                i, link, attempt = item
+                entry = process_with_timeout(i, link, attempt)
+                results_ordered[i] = entry
+                progress_q.put({"type": "result", "entry": entry})
+                task_q.task_done()
+
+        def run_batch(items):
+            task_q = _queue.Queue()
+            for item in items:
+                task_q.put(item)
+            pool = []
+            for _ in range(WORKERS):
+                t = _threading.Thread(target=pool_worker, args=(task_q,), daemon=True)
+                t.start()
+                pool.append(t)
+            # Ждём результаты
+            for _ in range(len(items)):
+                msg = progress_q.get()
+                yield f"data: {json.dumps(msg)}\n\n"
+            # Останавливаем воркеры
+            for _ in range(WORKERS):
+                task_q.put(None)
+            task_q.join()
 
         # ── Основной проход ──────────────────────────────────────────
         indexed_links = list(enumerate(links))
         _random.shuffle(indexed_links)
-
-        threads = []
-        for i, link in indexed_links:
-            t = _threading.Thread(target=run_worker, args=(i, link, 1), daemon=True)
-            threads.append(t)
-            t.start()
-
-        done_count = 0
-        while done_count < total:
-            msg = progress_q.get()
-            yield f"data: {json.dumps(msg)}\n\n"
-            if msg["type"] == "result":
-                done_count += 1
+        batch = [(i, link, 1) for i, link in indexed_links]
+        yield from run_batch(batch)
 
         # ── Retry для failed/timeout ─────────────────────────────────
         for attempt in range(2, MAX_RETRIES + 2):
@@ -544,18 +555,9 @@ def process_links():
                           if results_ordered[i] and not results_ordered[i].get("ok")]
             if not retry_list:
                 break
-
             yield f"data: {json.dumps({'type': 'retry_start', 'attempt': attempt, 'count': len(retry_list)})}\n\n"
-
-            retry_threads = []
-            for i, link in retry_list:
-                t = _threading.Thread(target=run_worker, args=(i, link, attempt), daemon=True)
-                retry_threads.append(t)
-                t.start()
-
-            for _ in range(len(retry_list)):
-                msg = progress_q.get()
-                yield f"data: {json.dumps(msg)}\n\n"
+            retry_batch = [(i, link, attempt) for i, link in retry_list]
+            yield from run_batch(retry_batch)
 
         results = [r for r in results_ordered if r is not None]
         for r in results:
