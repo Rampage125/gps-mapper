@@ -212,9 +212,9 @@ ROUTE_JS = Template("""
 
   var SelectedIcon = L.DivIcon.extend({options: {className: ''}});
   var selectedIcon = new SelectedIcon({
-    html: "<div style='width:14px;height:14px;border-radius:50%;background:#ff3b30;border:2px solid white;box-shadow:0 0 6px rgba(0,0,0,.35)'></div>",
-    iconSize: [14, 14],
-    iconAnchor: [7, 7]
+    html: "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='32' viewBox='0 0 22 32'><path d='M11 0C4.925 0 0 4.925 0 11c0 8.25 11 21 11 21s11-12.75 11-21C22 4.925 17.075 0 11 0z' fill='#ff3b30' stroke='white' stroke-width='1.5'/><circle cx='11' cy='10' r='4' fill='white' opacity='0.6'/></svg>",
+    iconSize: [22, 32],
+    iconAnchor: [11, 32]
   });
 
   function getMarkerName(marker) {
@@ -237,8 +237,8 @@ ROUTE_JS = Template("""
       m.__proxColor = tooClose ? '#ff3b30' : '#4286f4';
       var el = m.getElement();
       if (el) {
-        var dot = el.querySelector('.gps-dot');
-        if (dot) dot.style.background = m.__proxColor;
+        var pin = el.querySelector('.gps-pin');
+        if (pin) pin.setAttribute('fill', m.__proxColor);
       }
     });
   }
@@ -251,8 +251,8 @@ ROUTE_JS = Template("""
           setTimeout(function() {
             var el = marker.getElement();
             if (el) {
-              var dot = el.querySelector('.gps-dot');
-              if (dot) dot.style.background = marker.__proxColor || '#4286f4';
+              var pin = el.querySelector('.gps-pin');
+              if (pin) pin.setAttribute('fill', marker.__proxColor || '#4286f4');
             }
           }, 0);
         })(s.marker);
@@ -366,10 +366,14 @@ def build_map(points: list, out_path: str):
             tooltip=name,
             popup=f"{name}<br>{lat}, {lon}",
             icon=folium.DivIcon(
-                html="<div class='gps-dot' style='width:14px;height:14px;border-radius:50%;"
-                     "background:#4286f4;border:2px solid white;box-shadow:0 0 4px rgba(0,0,0,.4)'></div>",
-                icon_size=(14, 14),
-                icon_anchor=(7, 7),
+                html=(
+                    "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='32' viewBox='0 0 22 32'>"
+                    "<path class='gps-pin' d='M11 0C4.925 0 0 4.925 0 11c0 8.25 11 21 11 21s11-12.75 11-21"
+                    "C22 4.925 17.075 0 11 0z' fill='#4286f4' stroke='white' stroke-width='1.5'/>"
+                    "<circle cx='11' cy='10' r='4' fill='white' opacity='0.6'/></svg>"
+                ),
+                icon_size=(22, 32),
+                icon_anchor=(11, 32),
             ),
         ).add_to(m)
 
