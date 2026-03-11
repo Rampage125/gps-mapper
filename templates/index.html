@@ -1220,7 +1220,7 @@
     } else if (step === 'done-fail') {
       row.className = 'link-track-row done-fail';
       icon.innerHTML = makeIcon('fail');
-      if (raw) coordEl.textContent = raw.slice(0, 60);
+      if (raw) { coordEl.textContent = raw; coordEl.title = raw; coordEl.style.whiteSpace = 'normal'; }
     }
   }
 
