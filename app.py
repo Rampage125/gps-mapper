@@ -441,15 +441,18 @@ import threading
 UA = ("Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
-OG_RE  = re.compile(r'<meta[^>]+property=["\'"]og:image["\'"][^>]+content=["\'"]([^"\'"]+)["\'"]>', re.I)
-IBB_RE = re.compile(r"https?://i\.ibb\.co/[^\s\"']+", re.I)
+# property before content
+OG_RE  = re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', re.I | re.S)
+# content before property
+OG_RE2 = re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']', re.I | re.S)
+IBB_RE = re.compile(r"https?://i\.ibb\.co/[^\s\"'<>]+", re.I)
 
 
 def resolve_direct_url(share_url: str) -> str:
     req = urllib.request.Request(share_url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=40) as r:
         html = r.read().decode("utf-8", errors="ignore")
-    m = OG_RE.search(html)
+    m = OG_RE.search(html) or OG_RE2.search(html)
     if m:
         return m.group(1)
     m = IBB_RE.search(html)
