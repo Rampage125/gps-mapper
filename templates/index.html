@@ -1201,7 +1201,7 @@
     });
   }
 
-  function updateTracker(i, step, coords, raw) {
+  function updateTracker(i, step, coords) {
     const row = document.getElementById(`track-${i}`);
     if (!row) return;
     const icon = row.querySelector('.track-icon');
@@ -1220,7 +1220,6 @@
     } else if (step === 'done-fail') {
       row.className = 'link-track-row done-fail';
       icon.innerHTML = makeIcon('fail');
-      if (raw) { coordEl.textContent = raw; coordEl.title = raw; coordEl.style.whiteSpace = 'normal'; }
     }
   }
 
@@ -1282,7 +1281,7 @@
             } else if (msg.type === 'result') {
               const idx = msg.entry.idx || null;
               if (idx !== null) {
-                updateTracker(idx, msg.entry.ok ? 'done-ok' : 'done-fail', msg.entry.coords, msg.entry.raw);
+                updateTracker(idx, msg.entry.ok ? 'done-ok' : 'done-fail', msg.entry.coords);
                 // Накапливаем результаты на клиенте на случай обрыва стрима
                 partialResults[idx - 1] = msg.entry;
               }
