@@ -962,7 +962,7 @@
     results.forEach((r, idx) => {
       if (r.ok) {
         okCount++;
-        pointsData.push({ lat: r.coords[0], lon: r.coords[1], name: r.name, idx });
+        pointsData.push({ lat: r.coords[0], lon: r.coords[1], name: r.name, url: r.link || '', idx });
       } else {
         failCount++;
       }
@@ -1032,8 +1032,9 @@
 
     // Update or add
     const existing = pointsData.findIndex(p => p.idx === idx);
-    if (existing >= 0) pointsData[existing] = { lat, lon, name, idx };
-    else pointsData.push({ lat, lon, name, idx });
+    const url = existing >= 0 ? (pointsData[existing].url || '') : (ocrResults[idx] && ocrResults[idx].link ? ocrResults[idx].link : '');
+    if (existing >= 0) pointsData[existing] = { lat, lon, name, url, idx };
+    else pointsData.push({ lat, lon, name, url, idx });
 
     // Update UI
     document.getElementById(`coords-display-${idx}`).textContent = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;

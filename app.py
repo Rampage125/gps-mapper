@@ -354,17 +354,49 @@ ROUTE_JS = Template("""
 
 
 def build_map(points: list, out_path: str):
-    """points = [(lat, lon, name), ...]"""
+    """points = [(lat, lon, name, url), ...]  — url may be empty string"""
     avg_lat = sum(p[0] for p in points) / len(points)
     avg_lon = sum(p[1] for p in points) / len(points)
 
     m = folium.Map(location=(avg_lat, avg_lon), zoom_start=17, control_scale=True)
 
-    for lat, lon, name in points:
+    # Group points with identical coordinates into one marker
+    from collections import defaultdict
+    groups = defaultdict(list)  # (lat, lon) -> [(name, url), ...]
+    for p in points:
+        lat, lon, name = p[0], p[1], p[2]
+        url = p[3] if len(p) > 3 else ""
+        groups[(lat, lon)].append((name, url))
+
+    for (lat, lon), entries in groups.items():
+        # Build popup HTML: each entry is a clickable link (or plain name if no url)
+        lines = []
+        for name, url in entries:
+            if url:
+                lines.append(
+                    f'<a href="{url}" target="_blank" '
+                    f'style="color:#4286f4;text-decoration:underline;word-break:break-all">{name}</a>'
+                )
+            else:
+                lines.append(f'<span>{name}</span>')
+
+        names_joined = ", ".join(n for n, _ in entries)
+        coords_str = f"{lat}, {lon}"
+
+        if len(entries) == 1:
+            popup_html = f"{lines[0]}<br><span style='color:#888;font-size:11px'>{coords_str}</span>"
+        else:
+            items_html = "<br>".join(lines)
+            popup_html = (
+                f"<b style='font-size:12px'>{len(entries)} photos at this point</b><br>"
+                f"{items_html}<br>"
+                f"<span style='color:#888;font-size:11px'>{coords_str}</span>"
+            )
+
         folium.Marker(
             (lat, lon),
-            tooltip=name,
-            popup=f"{name}<br>{lat}, {lon}",
+            tooltip=names_joined,
+            popup=folium.Popup(popup_html, max_width=300),
             icon=folium.DivIcon(
                 html=(
                     "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='32' viewBox='0 0 22 32'>"
@@ -657,7 +689,7 @@ def build_map_route():
     points = []
     for p in points_raw:
         try:
-            points.append((float(p['lat']), float(p['lon']), str(p['name'])))
+            points.append((float(p['lat']), float(p['lon']), str(p['name']), str(p.get('url', ''))))
         except Exception:
             continue
 
