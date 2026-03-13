@@ -400,15 +400,15 @@ def build_map(points: list, out_path: str):
 
         if is_grouped:
             marker_svg = (
-                "<svg xmlns='http://www.w3.org/2000/svg' width='26' height='38' viewBox='0 0 26 38'>"
-                "<path class='gps-pin-grouped' d='M13 0C5.82 0 0 5.82 0 13c0 9.75 13 25 13 25S26 22.75 26 13"
-                "C26 5.82 20.18 0 13 0z' fill='#c849ff' stroke='white' stroke-width='1.5'/>"
-                "<text x='13' y='17' text-anchor='middle' font-family='monospace' font-size='14' "
-                "font-weight='bold' fill='white'>!</text>"
+                "<svg xmlns='http://www.w3.org/2000/svg' width='28' height='40' viewBox='0 0 28 40'>"
+                "<path class='gps-pin-grouped' d='M14 0C6.27 0 0 6.27 0 14c0 10.5 14 26 14 26S28 24.5 28 14"
+                "C28 6.27 21.73 0 14 0z' fill='#ff3b30' stroke='white' stroke-width='2'/>"
+                "<text x='14' y='20' text-anchor='middle' dominant-baseline='middle' "
+                "font-family='Arial,sans-serif' font-size='18' font-weight='bold' fill='white'>!</text>"
                 "</svg>"
             )
-            icon_size = (26, 38)
-            icon_anchor = (13, 38)
+            icon_size = (28, 40)
+            icon_anchor = (14, 40)
         else:
             marker_svg = (
                 "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='32' viewBox='0 0 22 32'>"
