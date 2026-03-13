@@ -230,12 +230,15 @@ ROUTE_JS = Template("""
       if (layer instanceof L.Marker) markers.push(layer);
     });
     markers.forEach(function(m) {
+      // Skip grouped markers (! icon) — they are already visually distinct
+      var el = m.getElement();
+      if (el && el.querySelector('.gps-pin-grouped')) return;
+
       var ll = m.getLatLng();
       var tooClose = markers.some(function(other) {
         return other !== m && ll.distanceTo(other.getLatLng()) < threshold;
       });
       m.__proxColor = tooClose ? '#ff3b30' : '#4286f4';
-      var el = m.getElement();
       if (el) {
         var pin = el.querySelector('.gps-pin');
         if (pin) pin.setAttribute('fill', m.__proxColor);
@@ -393,19 +396,37 @@ def build_map(points: list, out_path: str):
                 f"<span style='color:#888;font-size:11px'>{coords_str}</span>"
             )
 
+        is_grouped = len(entries) > 1
+
+        if is_grouped:
+            marker_svg = (
+                "<svg xmlns='http://www.w3.org/2000/svg' width='26' height='38' viewBox='0 0 26 38'>"
+                "<path class='gps-pin-grouped' d='M13 0C5.82 0 0 5.82 0 13c0 9.75 13 25 13 25S26 22.75 26 13"
+                "C26 5.82 20.18 0 13 0z' fill='#c849ff' stroke='white' stroke-width='1.5'/>"
+                "<text x='13' y='17' text-anchor='middle' font-family='monospace' font-size='14' "
+                "font-weight='bold' fill='white'>!</text>"
+                "</svg>"
+            )
+            icon_size = (26, 38)
+            icon_anchor = (13, 38)
+        else:
+            marker_svg = (
+                "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='32' viewBox='0 0 22 32'>"
+                "<path class='gps-pin' d='M11 0C4.925 0 0 4.925 0 11c0 8.25 11 21 11 21s11-12.75 11-21"
+                "C22 4.925 17.075 0 11 0z' fill='#4286f4' stroke='white' stroke-width='1.5'/>"
+                "<circle cx='11' cy='10' r='4' fill='white' opacity='0.6'/></svg>"
+            )
+            icon_size = (22, 32)
+            icon_anchor = (11, 32)
+
         folium.Marker(
             (lat, lon),
             tooltip=names_joined,
             popup=folium.Popup(popup_html, max_width=300),
             icon=folium.DivIcon(
-                html=(
-                    "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='32' viewBox='0 0 22 32'>"
-                    "<path class='gps-pin' d='M11 0C4.925 0 0 4.925 0 11c0 8.25 11 21 11 21s11-12.75 11-21"
-                    "C22 4.925 17.075 0 11 0z' fill='#4286f4' stroke='white' stroke-width='1.5'/>"
-                    "<circle cx='11' cy='10' r='4' fill='white' opacity='0.6'/></svg>"
-                ),
-                icon_size=(22, 32),
-                icon_anchor=(11, 32),
+                html=marker_svg,
+                icon_size=icon_size,
+                icon_anchor=icon_anchor,
             ),
         ).add_to(m)
 
