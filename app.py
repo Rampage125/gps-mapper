@@ -29,6 +29,13 @@ os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 
 # ─────────────────────────────────────────────
+#  SOCKS5 прокси (опционально, для обхода блокировок хостинга картинок)
+#  Формат: socks5://user:pass@host:port
+#  Если переменная не задана — запросы идут напрямую.
+# ─────────────────────────────────────────────
+SOCKS5_PROXY = os.environ.get('SOCKS5_PROXY', '').strip()
+
+# ─────────────────────────────────────────────
 #  Вырезаем левый верхний угол
 # ─────────────────────────────────────────────
 
@@ -501,11 +508,14 @@ def process():
 
 # ─────────────────────────────────────────────
 #  Downloader: ссылки → прямые URL → скачать
+#  Все исходящие запросы идут через SOCKS5, если задан SOCKS5_PROXY.
 # ─────────────────────────────────────────────
 
 import urllib.error
 import threading
 from urllib.parse import urlparse
+
+import requests
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -517,17 +527,58 @@ OG_RE2 = re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]*property=["\']og
 IBB_RE = re.compile(r"https?://i\.ibb\.co/[^\s\"'<>]+", re.I)
 
 
+def _safe_proxy_label() -> str:
+    """Возвращает безопасную строку для логов: host:port без креденшалов."""
+    if not SOCKS5_PROXY:
+        return "direct"
+    try:
+        p = urlparse(SOCKS5_PROXY)
+        return f"{p.scheme}://{p.hostname}:{p.port}"
+    except Exception:
+        return "socks5(set)"
+
+
+def _proxies_dict() -> dict:
+    """Словарь прокси для requests. Пустой если SOCKS5_PROXY не задан."""
+    if not SOCKS5_PROXY:
+        return {}
+    # socks5h:// = резолв DNS через прокси (важно если у Render проблемы с DNS)
+    url = SOCKS5_PROXY
+    if url.startswith("socks5://"):
+        url = "socks5h://" + url[len("socks5://"):]
+    return {"http": url, "https": url}
+
+
+def _default_headers(url: str) -> dict:
+    parsed = urlparse(url)
+    referer = f"{parsed.scheme}://{parsed.netloc}/"
+    return {
+        "User-Agent": UA,
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity",
+        "Referer": referer,
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+
+
 def resolve_direct_url(share_url: str) -> str:
-    print(f"[RESOLVE] Input URL: {share_url}", flush=True)
+    print(f"[RESOLVE] Input URL: {share_url} via {_safe_proxy_label()}", flush=True)
     # Если это уже прямая ссылка на картинку — возвращаем как есть
     if re.search(r"\.(jpg|jpeg|png|webp)(\?.*)?$", share_url, re.I):
         print(f"[RESOLVE] Direct image URL, skip HTML fetch", flush=True)
         return share_url
     try:
-        req = urllib.request.Request(share_url, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=40) as r:
-            html = r.read().decode("utf-8", errors="ignore")
-        print(f"[RESOLVE] Fetched HTML, len={len(html)}", flush=True)
+        headers = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"}
+        r = requests.get(share_url, headers=headers, proxies=_proxies_dict(), timeout=40)
+        print(f"[RESOLVE] Status {r.status_code}, body len={len(r.text)}", flush=True)
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}")
+        html = r.text
     except Exception as e:
         print(f"[RESOLVE] Fetch failed: {type(e).__name__}: {e}", flush=True)
         raise
@@ -544,39 +595,22 @@ def resolve_direct_url(share_url: str) -> str:
 
 
 def download_image(url: str, dest_path: str):
-    parsed = urlparse(url)
-    referer = f"{parsed.scheme}://{parsed.netloc}/"
-    headers = {
-        "User-Agent": UA,
-        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "identity",
-        "Referer": referer,
-        "Sec-Fetch-Dest": "image",
-        "Sec-Fetch-Mode": "no-cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    }
-    print(f"[DOWNLOAD] GET {url} with Referer {referer}", flush=True)
-    req = urllib.request.Request(url, headers=headers)
+    headers = _default_headers(url)
+    print(f"[DOWNLOAD] GET {url} via {_safe_proxy_label()}", flush=True)
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with requests.get(url, headers=headers, proxies=_proxies_dict(), timeout=60, stream=True) as r:
+            print(f"[DOWNLOAD] Status {r.status_code}", flush=True)
+            if r.status_code != 200:
+                body_preview = r.text[:200] if r.text else ''
+                print(f"[DOWNLOAD] Non-200 body_preview={body_preview!r}", flush=True)
+                raise RuntimeError(f"HTTP {r.status_code}")
+            total = 0
             with open(dest_path, "wb") as f:
-                while True:
-                    chunk = r.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-        print(f"[DOWNLOAD] OK", flush=True)
-    except urllib.error.HTTPError as e:
-        body_preview = b''
-        try:
-            body_preview = e.read()[:200]
-        except Exception:
-            pass
-        print(f"[DOWNLOAD] HTTPError {e.code} body_preview={body_preview!r}", flush=True)
-        raise
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+                        total += len(chunk)
+        print(f"[DOWNLOAD] OK, {total} bytes", flush=True)
     except Exception as e:
         print(f"[DOWNLOAD] Failed: {type(e).__name__}: {e}", flush=True)
         raise
@@ -627,7 +661,7 @@ def process_links():
         total = len(links)
         results_ordered = [None] * total
         progress_q = _queue.Queue()
-        PER_LINK_TIMEOUT = 20
+        PER_LINK_TIMEOUT = 30
         MAX_CONCURRENT = 5
         MAX_RETRIES = 2
 
@@ -640,7 +674,7 @@ def process_links():
 
             def _run():
                 import socket as _s2
-                _s2.setdefaulttimeout(15)
+                _s2.setdefaulttimeout(25)
                 slug2 = link.rstrip("/").split("/")[-1]
                 name2 = slug2 + ".jpg"
                 entry = {"name": name2, "link": link, "idx": i+1, "ok": False, "raw": "", "coords": None}
