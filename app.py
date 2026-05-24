@@ -505,9 +505,10 @@ def process():
 
 import urllib.error
 import threading
+from urllib.parse import urlparse
 
-UA = ("Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
 # property before content
 OG_RE  = re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', re.I | re.S)
@@ -543,14 +544,42 @@ def resolve_direct_url(share_url: str) -> str:
 
 
 def download_image(url: str, dest_path: str):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        with open(dest_path, "wb") as f:
-            while True:
-                chunk = r.read(1024 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
+    parsed = urlparse(url)
+    referer = f"{parsed.scheme}://{parsed.netloc}/"
+    headers = {
+        "User-Agent": UA,
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity",
+        "Referer": referer,
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    print(f"[DOWNLOAD] GET {url} with Referer {referer}", flush=True)
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            with open(dest_path, "wb") as f:
+                while True:
+                    chunk = r.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        print(f"[DOWNLOAD] OK", flush=True)
+    except urllib.error.HTTPError as e:
+        body_preview = b''
+        try:
+            body_preview = e.read()[:200]
+        except Exception:
+            pass
+        print(f"[DOWNLOAD] HTTPError {e.code} body_preview={body_preview!r}", flush=True)
+        raise
+    except Exception as e:
+        print(f"[DOWNLOAD] Failed: {type(e).__name__}: {e}", flush=True)
+        raise
 
 
 def parse_links(text: str) -> list:
