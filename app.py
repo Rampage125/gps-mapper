@@ -76,14 +76,21 @@ def _call_claude(img: Image.Image, prompt: str) -> str:
         headers={'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01'},
         method='POST'
     )
+    print(f"[CLAUDE] Calling API, key={'set' if ANTHROPIC_API_KEY else 'EMPTY'}, key_len={len(ANTHROPIC_API_KEY)}", flush=True)
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8', errors='ignore')
+        print(f"[CLAUDE] HTTPError {e.code}: {body}", flush=True)
         raise RuntimeError(f"Anthropic API {e.code}: {body}")
+    except Exception as e:
+        print(f"[CLAUDE] Other error: {type(e).__name__}: {e}", flush=True)
+        raise
     if 'error' in data:
+        print(f"[CLAUDE] API returned error: {data['error']}", flush=True)
         raise RuntimeError(f"API error: {data['error']}")
+    print(f"[CLAUDE] Success, got {len(data.get('content', []))} content blocks", flush=True)
     return data['content'][0]['text'].strip()
 
 
@@ -510,17 +517,28 @@ IBB_RE = re.compile(r"https?://i\.ibb\.co/[^\s\"'<>]+", re.I)
 
 
 def resolve_direct_url(share_url: str) -> str:
-    req = urllib.request.Request(share_url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=40) as r:
-        html = r.read().decode("utf-8", errors="ignore")
+    print(f"[RESOLVE] Input URL: {share_url}", flush=True)
+    # Если это уже прямая ссылка на картинку — возвращаем как есть
+    if re.search(r"\.(jpg|jpeg|png|webp)(\?.*)?$", share_url, re.I):
+        print(f"[RESOLVE] Direct image URL, skip HTML fetch", flush=True)
+        return share_url
+    try:
+        req = urllib.request.Request(share_url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=40) as r:
+            html = r.read().decode("utf-8", errors="ignore")
+        print(f"[RESOLVE] Fetched HTML, len={len(html)}", flush=True)
+    except Exception as e:
+        print(f"[RESOLVE] Fetch failed: {type(e).__name__}: {e}", flush=True)
+        raise
     m = OG_RE.search(html) or OG_RE2.search(html)
     if m:
+        print(f"[RESOLVE] Found via og:image: {m.group(1)}", flush=True)
         return m.group(1)
     m = IBB_RE.search(html)
     if m:
+        print(f"[RESOLVE] Found via i.ibb.co: {m.group(0)}", flush=True)
         return m.group(0)
-    if re.search(r"\.(jpg|jpeg|png|webp)(\?.*)?$", share_url, re.I):
-        return share_url
+    print(f"[RESOLVE] No direct URL found in HTML", flush=True)
     raise RuntimeError("Не удалось найти прямую ссылку: " + share_url)
 
 
@@ -558,10 +576,12 @@ _sessions_lock = __import__('threading').Lock()
 @app.route("/api/process_links", methods=["POST"])
 def process_links():
     from flask import Response, stream_with_context
+
     data = request.get_json()
     text = (data or {}).get("text", "").strip()
     if not text:
         return jsonify({"error": "No links provided"}), 400
+
     links = parse_links(text)
     if not links:
         return jsonify({"error": "No valid URLs found"}), 400
@@ -578,7 +598,6 @@ def process_links():
         total = len(links)
         results_ordered = [None] * total
         progress_q = _queue.Queue()
-
         PER_LINK_TIMEOUT = 20
         MAX_CONCURRENT = 5
         MAX_RETRIES = 2
@@ -596,26 +615,34 @@ def process_links():
                 slug2 = link.rstrip("/").split("/")[-1]
                 name2 = slug2 + ".jpg"
                 entry = {"name": name2, "link": link, "idx": i+1, "ok": False, "raw": "", "coords": None}
+
                 # Статус: download
                 progress_q.put({"type": "status", "step": "download", "i": i+1,
-                                 "total": total, "name": name2, "attempt": attempt})
+                                "total": total, "name": name2, "attempt": attempt})
                 try:
+                    print(f"[WORKER {i+1}/{total}] Processing link: {link}", flush=True)
                     direct = resolve_direct_url(link)
+                    print(f"[WORKER {i+1}/{total}] Direct URL: {direct}", flush=True)
                     m = re.search(r"\.(jpg|jpeg|png|webp)", direct, re.I)
                     ext = ("." + m.group(1).lower()) if m else ".jpg"
                     dest = os.path.join(session_dir, name2 + ext)
                     download_image(direct, dest)
+                    file_size = os.path.getsize(dest) if os.path.exists(dest) else 0
+                    print(f"[WORKER {i+1}/{total}] Downloaded {file_size} bytes to {dest}", flush=True)
                     # Статус: ocr
                     progress_q.put({"type": "status", "step": "ocr", "i": i+1,
-                                     "total": total, "name": name2, "attempt": attempt})
+                                    "total": total, "name": name2, "attempt": attempt})
                     result = ocr_image(dest, name2)
+                    print(f"[WORKER {i+1}/{total}] OCR result: ok={result.get('ok')}, raw={result.get('raw')}", flush=True)
                     entry.update(result)
                     try:
                         os.remove(dest)
                     except Exception:
                         pass
                 except Exception as e:
+                    print(f"[WORKER {i+1}/{total}] Exception: {type(e).__name__}: {e}", flush=True)
                     entry["raw"] = str(e)
+
                 result_box[0] = entry
                 done_evt.set()
 
@@ -695,6 +722,7 @@ def process_links():
         for r in results:
             if not r.get("ok") and not r.get("raw"):
                 r["raw"] = "failed"
+
         shutil.rmtree(session_dir, ignore_errors=True)
         yield f"data: {json.dumps({'type':'done','results':results,'session_id':session_id})}\n\n"
 
@@ -707,7 +735,6 @@ def process_links():
 def build_map_route():
     data = request.get_json()
     points_raw = data.get('points', [])
-
     if not points_raw:
         return jsonify({'error': 'No points provided'}), 400
 
@@ -765,18 +792,16 @@ def share_map():
         headers={'Content-Type': 'application/json'},
         method='POST'
     )
+
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode('utf-8'))
-
-        if not result.get('success'):
-            code = result.get('code', '')
-            err  = result.get('error', str(result))
-            return jsonify({'error': f'{code}: {err}'}), 502
-
-        url = result['data']['url']
-        return jsonify({'url': url, 'service': 'pagedrop.io'})
-
+            if not result.get('success'):
+                code = result.get('code', '')
+                err = result.get('error', str(result))
+                return jsonify({'error': f'{code}: {err}'}), 502
+            url = result['data']['url']
+            return jsonify({'url': url, 'service': 'pagedrop.io'})
     except Exception as e:
         return jsonify({'error': str(e)}), 502
 
